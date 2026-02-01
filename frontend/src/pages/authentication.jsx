@@ -58,11 +58,9 @@ export default function Authentication() {
                 setPassword("")
             }
         } catch (err) {
-
-            console.log(err);
-const message =
-    err.response?.data?.message || "Something went wrong";
-
+            console.log(err)
+            return;
+let message = (err.response.data.message);
             setError(message);
         }
     }
@@ -78,7 +76,7 @@ const message =
                     sm={4}
                     md={7}
                     sx={{
-                        backgroundImage: 'url(https://source.unsplash.com/random?wallpapers)',
+                        backgroundImage: 'url("https://source.unsplash.com/1600x900/?technology,abstract")',
                         backgroundRepeat: 'no-repeat',
                         backgroundColor: (t) =>
                             t.palette.mode === 'light' ? t.palette.grey[50] : t.palette.grey[900],
