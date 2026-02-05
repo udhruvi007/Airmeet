@@ -119,11 +119,53 @@ let getMedia = () => {
   
   
 let getUserMediaSuccess = (stream) => {
+    try{
+     window.localStream.getTracks().forEach(track => track.stop()) 
 
-}
+    }catch(e){console.log(e)}
 
+    window.localStream = stream;
+    localVideoRef.current.srcObject = stream;
 
+    for(let id in connections){
+      if(id === socketIdRef.current)continue
 
+      connections[id].addStream(window.localStream)
+      connections[id].createOffer().then((description)=>{
+      console.log(description)
+       connections[id].setLocalDescription(description)
+       .then(()=>{
+        socketRef.current.emit('signal', id, JSON.stringify({"sdp":connections[id].localDescription}))
+       })
+       .catch(e => console.log(e))
+      })
+    }
+    stream.getTracks().forEach(track => track.onended = () => {
+      setVideo(false);
+      setAudio(false);
+    
+     try {
+           let tracks = localVideoRef.current.srcObject.getTracks()
+          tracks.forEach(track => track.stop())
+        } catch (e) { console.log(e) }
+
+         let blackSilence = (...args) => new MediaStream([black(...args), silence()])
+            window.localStream = blackSilence()
+            localVideoRef.current.srcObject = window.localStream
+
+            for (let id in connections) {
+                connections[id].addStream(window.localStream)
+
+                connections[id].createOffer().then((description) => {
+                    connections[id].setLocalDescription(description)
+                        .then(() => {
+                            socketRef.current.emit('signal', id, JSON.stringify({ 'sdp': connections[id].localDescription }))
+                        })
+                        .catch(e => console.log(e))
+                })
+             }
+         })
+      }
 
 let getUserMedia = () => {
   if((video && videoAvailable) || (audio && audioAvailable)){
@@ -145,8 +187,26 @@ const addMessage = () => {};
 
 
 let gotMessageFromServer = ({fromId,message}) => {
+      var signal = JSON.parse(message)
 
-}
+      if(fromId !== socketIdRef.current){
+        if(signal.sdp){
+          connections[fromId].setRemoteDescription(new RTCSessionDescription(signal.sdp)).then(()=>{
+            if(signal.sdp.type === 'offer'){
+
+              connections[fromId].createAnswer().then((description)=>{
+             connections[fromId].setLocalDescription(description).then(() => {
+                socketRef.current.emit('signal', fromId, JSON.stringify({"sdp":connections[fromId].localDescription }))
+              }).catch(e => console.log(e))
+            }).catch(e => console.log(e))
+          }
+        }).catch(e => console.log(e))
+      }
+       if (signal.ice) {
+                connections[fromId].addIceCandidate(new RTCIceCandidate(signal.ice)).catch(e => console.log(e))
+            }
+          }
+      }
 
 let connectToSocketServer = () => {
   socketRef.current = io.connect(server_url, {secure:false})
@@ -267,7 +327,16 @@ let connect = () => {
     <video ref={localVideoRef} autoPlay muted></video>
    </div>
 
-      </div> : <> </>
+      </div> : <> 
+      
+      <video ref={localVideoRef} autoPlay muted></video>
+       
+       {videos.map((video)=>(
+        <div key={video.socketId}>
+
+        </div>
+       ))}     
+      </>
     }
     </div>
   ) 
