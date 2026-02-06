@@ -1,6 +1,6 @@
 import React, {useEffect, useState, useRef } from 'react';
 import io from "socket.io-client";
-import "../styles/VideoComponent.css";
+import styles from "../styles/VideoComponent.module.css";
 import { Badge, IconButton, TextField } from '@mui/material';
 import { Button } from '@mui/material';
 
@@ -49,7 +49,10 @@ function VideoMeetComponent() {
 
   let [videos, setVideos] = useState([])
 
-
+const sendMessage = () => {
+    // abhi dummy, logic baad me add karenge
+    console.log("Send button clicked"); 
+  };
   // if(isChrome()===false){
 
   // }
@@ -327,19 +330,65 @@ let connect = () => {
     <video ref={localVideoRef} autoPlay muted></video>
    </div>
 
-      </div> : <> 
-      
-      <video ref={localVideoRef} autoPlay muted></video>
-       
-       {videos.map((video)=>(
-        <div key={video.socketId}>
+      </div> :
+
+ <div className={styles.meetVideoContainer}>
+
+  {showModal ? <div className={styles.chatRoom}>
+
+  <div className={styles.chatContainer}>
+    <h1>Chat</h1>
+
+  <div className={styles.chattingDisplay}>
+
+     {messages.length !== 0 ? messages.map((item, index) => {
+
+     console.log(messages)
+     return (
+         <div style={{ marginBottom: "20px" }} key={index}>
+             <p style={{ fontWeight: "bold" }}>{item.sender}</p>
+             <p>{item.data}</p>
+         </div>
+      )
+            }) : <p>No Messages Yet</p>}
+  </div>
+
+
+ <div className={styles.chattingArea}>
+     <TextField value={message} onChange={(e) => setMessage(e.target.value)} id="outlined-basic" label="Enter Your chat" variant="outlined" />
+     <Button variant='contained' onClick={sendMessage}>Send</Button>
+ </div>
+  </div>
+                                            </div> : <></>}
+  <video className={styles.meetUserVideo} ref={localVideoRef} autoPlay muted></video>
+
+    <div className={styles.conferenceView}>
+        {videos.map((video) => (
+            <div key={video.socketId}>
+                <video
+
+                data-socket={video.socketId}
+                ref={ref => {
+                    if (ref && video.stream) {
+                        ref.srcObject = video.stream;
+                    }
+                }}
+                autoPlay
+            >
+            </video>
+        </div>
+
+   ))}
+
+       </div>
+
+          </div>
+
+    }
 
         </div>
-       ))}     
-      </>
-    }
-    </div>
-  ) 
+    )
 }
+
 
 export default VideoMeetComponent
