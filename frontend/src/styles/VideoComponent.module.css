@@ -36,4 +36,24 @@
     min-width: 30vw;
     border-radius: 10px;
 }
+.chatRoom {
+    position: absolute;
+    height: 90vh;
+    right: 0;
+    background: white;
+    border-radius: 10px;
+    width: 30vw;
+    padding-inline: 20px;
+}
+
+.chatContainer {
+    position: relative;
+    height: 100%;
+}
+
+
+.chattingArea {
+    position: absolute;
+    bottom: 0;
+}
 
