@@ -63,7 +63,7 @@ function VideoMeetComponent() {
   useEffect(() => {
         console.log("HELLO")
         getPermission();
-    },[]);
+    });
 
       let getDisplayMedia = () => {
         if (screen) {
