@@ -16,7 +16,6 @@ function App() {
           <Routes>
             <Route path="/" element={<LandingPage />} />
             <Route path="/auth" element={<Authentication />} />
-            // App.js
           <Route path="/home" element={
            <ProtectedRoute>
            <HomeComponent />

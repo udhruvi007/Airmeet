@@ -82,20 +82,20 @@ export default function VideoMeet() {
   // ---------------------------
   // helpers
   // ---------------------------
-  const safePlay = (el) => {
-    if (!el) return;
-    const p = el.play?.();
-    if (p) p.catch(() => {});
-  };
+const safePlay = useCallback((el) => {
+  if (!el) return;
+  const p = el.play?.();
+  if (p) p.catch(() => {});
+}, []);
 
-  const attachStream = (el, stream, muted = false) => {
-    if (!el || !stream) return;
-    el.srcObject = stream;
-    el.muted = muted;
-    el.playsInline = true;
-    el.autoplay = true;
-    safePlay(el);
-  };
+const attachStream = useCallback((el, stream, muted = false) => {
+  if (!el || !stream) return;
+  el.srcObject = stream;
+  el.muted = muted;
+  el.playsInline = true;
+  el.autoplay = true;
+  safePlay(el);
+}, [safePlay]);
 
   const toDisplayName = (id) => {
     const p = participants.find((x) => x.id === id);
@@ -149,7 +149,7 @@ export default function VideoMeet() {
       attachStream(localVideoRef.current, window.localStream, true);
       localVideoRef.current.style.transform = "scaleX(-1)";
     }
-  }, [askForUsername, layout, screen]);
+  }, [askForUsername, layout, screen,attachStream]);
 
   // meeting title
   useEffect(() => {
@@ -196,7 +196,7 @@ export default function VideoMeet() {
 
     peersRef.current[remoteSocketId] = pc;
     return pc;
-  }, []);
+  }, [attachStream]);
 
   const cleanupPeer = useCallback((id) => {
     try {
@@ -375,7 +375,6 @@ export default function VideoMeet() {
       socketRef.current = null;
       closeAllPeers();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [askForUsername, roomId, username, createPeer, cleanupPeer, closeAllPeers]);
 
   // ---------------------------

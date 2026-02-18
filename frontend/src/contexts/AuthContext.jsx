@@ -16,7 +16,7 @@ export const AuthProvider = ({ children }) => {
     const users = JSON.parse(localStorage.getItem("airmeet_users") || "[]");
     const exists = users.find((u) => u.username === username);
     if (exists) {
-      throw { response: { data: { message: "User already exists" } } };
+    throw new Error("User already exists");
     }
 
     users.push({ name, username, password });
@@ -30,7 +30,7 @@ export const AuthProvider = ({ children }) => {
 
     const user = users.find((u) => u.username === username && u.password === password);
     if (!user) {
-      throw { response: { data: { message: "Invalid username or password" } } };
+  throw new Error("Invalid username or password");
     }
 
     localStorage.setItem("token", "demo-token-" + username);
@@ -65,18 +65,26 @@ export const AuthProvider = ({ children }) => {
     localStorage.setItem(key, JSON.stringify(history));
   };
 
-  const value = useMemo(
-    () => ({
-      userData,
-      setUserData,
-      handleRegister,
-      handleLogin,
-      handleLogout,
-      addToUserHistory,
-      getHistoryOfUser,
-    }),
-    [userData]
-  );
+ const value = useMemo(
+  () => ({
+    userData,
+    setUserData,
+    handleRegister,
+    handleLogin,
+    handleLogout,
+    addToUserHistory,
+    getHistoryOfUser,
+  }),
+  [
+    userData,
+    handleRegister,
+    handleLogin,
+    handleLogout,
+    addToUserHistory,
+    getHistoryOfUser,
+  ]
+);
+
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 };
