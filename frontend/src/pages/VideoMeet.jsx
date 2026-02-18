@@ -375,7 +375,7 @@ const attachStream = useCallback((el, stream, muted = false) => {
       socketRef.current = null;
       closeAllPeers();
     };
-  }, [askForUsername, roomId, username, createPeer, cleanupPeer, closeAllPeers]);
+  }, [askForUsername, roomId, username, createPeer, cleanupPeer, closeAllPeers,attachStream,handleEndCall,showChat]);
 
   // ---------------------------
   // actions
@@ -464,7 +464,7 @@ const attachStream = useCallback((el, stream, muted = false) => {
     }
   };
 
-  const handleEndCall = (silent = false) => {
+  const handleEndCall = useCallback((silent = false) => {
     if (!silent) {
       try {
         const s = window.localStream;
@@ -478,7 +478,7 @@ const attachStream = useCallback((el, stream, muted = false) => {
 
     closeAllPeers();
     navigate("/home");
-  };
+  },[closeAllPeers, navigate]);
 
   const toggleHandRaise = () => {
     setHandRaised((prev) => {
