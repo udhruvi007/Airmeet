@@ -1,4 +1,4 @@
-import React, { createContext, useMemo, useState } from "react";
+import React, { createContext, useMemo, useState, useCallback} from "react";
 import { useNavigate } from "react-router-dom";
 
 export const AuthContext = createContext(null);
@@ -9,61 +9,63 @@ export const AuthProvider = ({ children }) => {
   const [userData, setUserData] = useState({});
 
   // ---------- helpers ----------
-  const getCurrentUser = () => localStorage.getItem("airmeet_current_user") || "";
-  const historyKey = () => `airmeet_history_${getCurrentUser() || "guest"}`;
+ const getCurrentUser = useCallback(
+  () => localStorage.getItem("airmeet_current_user") || "",
+  []
+);
 
-  const handleRegister = async (name, username, password) => {
-    const users = JSON.parse(localStorage.getItem("airmeet_users") || "[]");
-    const exists = users.find((u) => u.username === username);
-    if (exists) {
-    throw new Error("User already exists");
-    }
+const historyKey = useCallback(
+  () => `airmeet_history_${getCurrentUser() || "guest"}`,
+  [getCurrentUser]
+);
 
-    users.push({ name, username, password });
-    localStorage.setItem("airmeet_users", JSON.stringify(users));
 
-    return "Registration successful! Please sign in.";
-  };
+const handleRegister = useCallback(async (name, username, password) => {
+  const users = JSON.parse(localStorage.getItem("airmeet_users") || "[]");
+  const exists = users.find((u) => u.username === username);
+  if (exists) throw new Error("User already exists");
 
-  const handleLogin = async (username, password) => {
-    const users = JSON.parse(localStorage.getItem("airmeet_users") || "[]");
+  users.push({ name, username, password });
+  localStorage.setItem("airmeet_users", JSON.stringify(users));
 
-    const user = users.find((u) => u.username === username && u.password === password);
-    if (!user) {
-  throw new Error("Invalid username or password");
-    }
+  return "Registration successful! Please sign in.";
+}, []);
 
-    localStorage.setItem("token", "demo-token-" + username);
-    localStorage.setItem("airmeet_current_user", username);
+const handleLogin = useCallback(async (username, password) => {
+  const users = JSON.parse(localStorage.getItem("airmeet_users") || "[]");
 
-    setUserData({ name: user.name, username: user.username });
+  const user = users.find((u) => u.username === username && u.password === password);
+  if (!user) throw new Error("Invalid username or password");
 
-    navigate("/home");
-  };
+  localStorage.setItem("token", "demo-token-" + username);
+  localStorage.setItem("airmeet_current_user", username);
 
-  const handleLogout = () => {
-    localStorage.removeItem("token");
-    localStorage.removeItem("airmeet_current_user");
-    setUserData({});
-    navigate("/");
-  };
+  setUserData({ name: user.name, username: user.username });
+  navigate("/home");
+}, [navigate]);
 
-  const getHistoryOfUser = async () => {
-    const key = historyKey();
-    const history = JSON.parse(localStorage.getItem(key) || "[]");
-    return Array.isArray(history) ? history : [];
-  };
+const handleLogout = useCallback(() => {
+  localStorage.removeItem("token");
+  localStorage.removeItem("airmeet_current_user");
+  setUserData({});
+  navigate("/");
+}, [navigate]);
 
-  const addToUserHistory = async (meetingCode) => {
-    if (!meetingCode) return;
+const getHistoryOfUser = useCallback(async () => {
+  const key = historyKey();
+  const history = JSON.parse(localStorage.getItem(key) || "[]");
+  return Array.isArray(history) ? history : [];
+}, [historyKey]);
 
-    const key = historyKey();
-    const history = JSON.parse(localStorage.getItem(key) || "[]");
+const addToUserHistory = useCallback(async (meetingCode) => {
+  if (!meetingCode) return;
 
-    history.push({ meeting_code: meetingCode, date: new Date().toISOString() });
+  const key = historyKey();
+  const history = JSON.parse(localStorage.getItem(key) || "[]");
 
-    localStorage.setItem(key, JSON.stringify(history));
-  };
+  history.push({ meeting_code: meetingCode, date: new Date().toISOString() });
+  localStorage.setItem(key, JSON.stringify(history));
+}, [historyKey]);
 
  const value = useMemo(
   () => ({

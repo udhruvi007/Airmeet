@@ -3,7 +3,7 @@ import "./App.css";
 import { Route, BrowserRouter as Router, Routes } from "react-router-dom";
 import LandingPage from "./pages/landing";
 import Authentication from "./pages/authentication";
-import VideoMeetComponent from "./pages/VideoMeet";
+import VideoMeet from "./pages/VideoMeet";
 import History from "./pages/history";
 import HomeComponent from "./pages/home";
 import ProtectedRoute from "./utils/ProtectedRoute";
@@ -28,7 +28,7 @@ function App() {
           </ProtectedRoute>
          } />
 
-        <Route path="/meet/:roomId" element={<VideoMeetComponent />} />
+        <Route path="/meet/:roomId" element={<VideoMeet />} />
 
           </Routes>
         </AuthProvider>

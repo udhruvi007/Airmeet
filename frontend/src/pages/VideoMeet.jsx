@@ -3,26 +3,34 @@ import { useParams, useNavigate } from "react-router-dom";
 import io from "socket.io-client";
 
 const SERVER_URL = process.env.REACT_APP_SERVER_URL || "http://localhost:8000";
-
 const iceServers = [{ urls: "stun:stun.l.google.com:19302" }];
 
 export default function VideoMeet() {
   const { roomId } = useParams();
   const navigate = useNavigate();
 
+  // DOM refs
   const localVideoRef = useRef(null);
   const fileInputRef = useRef(null);
+  const remoteVideoRefs = useRef({}); // { socketId: HTMLVideoElement }
+const didConnectRef = useRef(false);
 
-  // socket + webrtc
+  // socket + webrtc refs
   const socketRef = useRef(null);
   const peersRef = useRef({}); // { socketId: RTCPeerConnection }
-  const remoteVideoRefs = useRef({}); // { socketId: HTMLVideoElement }
+
+  // screen share refs
+  const screenStreamRef = useRef(null);
+  const isScreenSharingRef = useRef(false);
+
+  // chat open ref
+  const showChatRef = useRef(false);
 
   // media availability
   const [videoAvailable, setVideoAvailable] = useState(true);
   const [audioAvailable, setAudioAvailable] = useState(true);
 
-  // toggles
+  // meeting toggles
   const [video, setVideo] = useState(true);
   const [audio, setAudio] = useState(true);
   const [screen, setScreen] = useState(false);
@@ -39,11 +47,13 @@ export default function VideoMeet() {
 
   // waiting room state (from backend)
   const [isWaiting, setIsWaiting] = useState(false);
-  const [role, setRole] = useState("guest"); // "host" | "guest"
+  const [role, setRole] = useState("guest"); // host|guest
 
   // UI state
   const [layout, setLayout] = useState("grid");
   const [handRaised, setHandRaised] = useState(false);
+  const [raisedHands, setRaisedHands] = useState({}); // {socketId: true/false}
+
   const [showReactions, setShowReactions] = useState(false);
   const [showMore, setShowMore] = useState(false);
   const [floatingReaction, setFloatingReaction] = useState(null);
@@ -82,25 +92,53 @@ export default function VideoMeet() {
   // ---------------------------
   // helpers
   // ---------------------------
-const safePlay = useCallback((el) => {
-  if (!el) return;
-  const p = el.play?.();
-  if (p) p.catch(() => {});
-}, []);
+  useEffect(() => {
+    showChatRef.current = showChat;
+  }, [showChat]);
 
-const attachStream = useCallback((el, stream, muted = false) => {
-  if (!el || !stream) return;
-  el.srcObject = stream;
-  el.muted = muted;
-  el.playsInline = true;
-  el.autoplay = true;
-  safePlay(el);
-}, [safePlay]);
+  const safePlay = useCallback((el) => {
+    if (!el) return;
+    const p = el.play?.();
+    if (p) p.catch(() => {});
+  }, []);
 
-  const toDisplayName = (id) => {
-    const p = participants.find((x) => x.id === id);
-    return p?.name || `Guest-${id?.slice?.(0, 5) || "??"}`;
-  };
+  const attachStream = useCallback(
+    (el, stream, muted = false) => {
+      if (!el || !stream) return;
+      el.srcObject = stream;
+      el.muted = muted;
+      el.playsInline = true;
+      el.autoplay = true;
+      safePlay(el);
+    },
+    [safePlay]
+  );
+
+  // ✅ IMPORTANT FIX: local video element changes (grid/speaker switch)
+  const setLocalVideoEl = useCallback(
+    (el) => {
+      if (!el) return;
+      localVideoRef.current = el;
+
+      const streamToShow = isScreenSharingRef.current
+        ? screenStreamRef.current
+        : window.localStream;
+
+      if (streamToShow) {
+        attachStream(el, streamToShow, true);
+        el.style.transform = isScreenSharingRef.current ? "none" : "scaleX(-1)";
+      }
+    },
+    [attachStream]
+  );
+
+  const toDisplayName = useCallback(
+    (id) => {
+      const p = participants.find((x) => x.id === id);
+      return p?.name || `Guest-${id?.slice?.(0, 5) || "??"}`;
+    },
+    [participants]
+  );
 
   const totalParticipants = remoteIds.length + 1;
   const getGridClass = () => {
@@ -116,12 +154,16 @@ const attachStream = useCallback((el, stream, muted = false) => {
   useEffect(() => {
     const getPermission = async () => {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: true,
+        });
         window.localStream = stream;
 
         setVideoAvailable(stream.getVideoTracks().length > 0);
         setAudioAvailable(stream.getAudioTracks().length > 0);
 
+        // attach in lobby
         if (localVideoRef.current) {
           attachStream(localVideoRef.current, stream, true);
           localVideoRef.current.style.transform = "scaleX(-1)";
@@ -140,16 +182,11 @@ const attachStream = useCallback((el, stream, muted = false) => {
         const s = window.localStream;
         if (s) s.getTracks().forEach((t) => t.stop());
       } catch {}
+      try {
+        screenStreamRef.current?.getTracks?.().forEach((t) => t.stop());
+      } catch {}
     };
-  }, []);
-
-  // reattach local stream on view changes
-  useEffect(() => {
-    if (!askForUsername && !screen && window.localStream && localVideoRef.current) {
-      attachStream(localVideoRef.current, window.localStream, true);
-      localVideoRef.current.style.transform = "scaleX(-1)";
-    }
-  }, [askForUsername, layout, screen,attachStream]);
+  }, [attachStream]);
 
   // meeting title
   useEffect(() => {
@@ -172,31 +209,56 @@ const attachStream = useCallback((el, stream, muted = false) => {
   // ---------------------------
   // WebRTC
   // ---------------------------
-  const createPeer = useCallback((remoteSocketId) => {
-    const pc = new RTCPeerConnection({ iceServers });
+  const createPeer = useCallback(
+    (remoteSocketId) => {
+      const pc = new RTCPeerConnection({ iceServers });
 
-    const stream = window.localStream;
-    if (stream) stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+      const stream = window.localStream;
 
-    pc.onicecandidate = (e) => {
-      if (e.candidate && socketRef.current) {
-        socketRef.current.emit("signal", remoteSocketId, { candidate: e.candidate });
+      if (stream) {
+        // audio from mic
+        stream.getAudioTracks().forEach((track) => pc.addTrack(track, stream));
+
+        // video: screen if sharing, else camera
+        const camVideo = stream.getVideoTracks()[0];
+        const screenVideo = screenStreamRef.current?.getVideoTracks?.()?.[0];
+
+        const videoToSend =
+          isScreenSharingRef.current && screenVideo ? screenVideo : camVideo;
+
+        if (videoToSend) {
+          pc.addTrack(
+            videoToSend,
+            isScreenSharingRef.current ? screenStreamRef.current : stream
+          );
+        }
       }
-    };
 
-    pc.ontrack = (e) => {
-      const [remoteStream] = e.streams;
-      if (!remoteStream) return;
+      pc.onicecandidate = (e) => {
+        if (e.candidate && socketRef.current) {
+          socketRef.current.emit("signal", remoteSocketId, {
+            candidate: e.candidate,
+          });
+        }
+      };
 
-      const el = remoteVideoRefs.current[remoteSocketId];
-      if (el) attachStream(el, remoteStream, false);
+      pc.ontrack = (e) => {
+        const [remoteStream] = e.streams;
+        if (!remoteStream) return;
 
-      setRemoteIds((prev) => (prev.includes(remoteSocketId) ? prev : [...prev, remoteSocketId]));
-    };
+        const el = remoteVideoRefs.current[remoteSocketId];
+        if (el) attachStream(el, remoteStream, false);
 
-    peersRef.current[remoteSocketId] = pc;
-    return pc;
-  }, [attachStream]);
+        setRemoteIds((prev) =>
+          prev.includes(remoteSocketId) ? prev : [...prev, remoteSocketId]
+        );
+      };
+
+      peersRef.current[remoteSocketId] = pc;
+      return pc;
+    },
+    [attachStream]
+  );
 
   const cleanupPeer = useCallback((id) => {
     try {
@@ -207,6 +269,11 @@ const attachStream = useCallback((el, stream, muted = false) => {
 
     setRemoteIds((prev) => prev.filter((x) => x !== id));
     setParticipants((prev) => prev.filter((p) => p.id !== id));
+    setRaisedHands((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
   }, []);
 
   const closeAllPeers = useCallback(() => {
@@ -220,12 +287,56 @@ const attachStream = useCallback((el, stream, muted = false) => {
     setRemoteIds([]);
   }, []);
 
+  const handleEndCall = useCallback(
+    (silent = false) => {
+      if (!silent) {
+        try {
+          const s = window.localStream;
+          if (s) s.getTracks().forEach((t) => t.stop());
+        } catch {}
+        try {
+          screenStreamRef.current?.getTracks?.().forEach((t) => t.stop());
+        } catch {}
+      }
+
+      try {
+        socketRef.current?.disconnect();
+      } catch {}
+
+      closeAllPeers();
+      navigate("/home");
+    },
+    [closeAllPeers, navigate]
+  );
+
+  // ✅ replaceTrack for screen share
+  const replaceVideoTrackForAllPeers = useCallback(async (newTrack) => {
+    const peerIds = Object.keys(peersRef.current);
+
+    for (const id of peerIds) {
+      const pc = peersRef.current[id];
+      if (!pc) continue;
+
+      const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+      if (sender) {
+        try {
+          await sender.replaceTrack(newTrack);
+        } catch (e) {
+          console.error("replaceTrack failed:", e);
+        }
+      }
+    }
+  }, []);
+
   // ---------------------------
   // socket connect AFTER name submit
   // ---------------------------
   useEffect(() => {
     if (askForUsername) return;
     if (!roomId) return;
+
+      if (didConnectRef.current) return;
+  didConnectRef.current = true;
 
     const socket = io(SERVER_URL, {
       transports: ["websocket"],
@@ -235,49 +346,42 @@ const attachStream = useCallback((el, stream, muted = false) => {
     socketRef.current = socket;
 
     socket.on("connect", () => {
-      // JOIN WITH WAITING ROOM FLOW ✅
       socket.emit("join-room", { roomId, name: username });
-
-      // show myself in list (temporary, final list participants-update se sync hogi)
       setParticipants([{ id: socket.id, name: `${username} (You)` }]);
     });
 
-    // guest is waiting
     socket.on("waiting", () => {
       setIsWaiting(true);
       setRole("guest");
     });
 
-    // host sees waiting list updates
     socket.on("waiting-update", (list) => {
       setWaitingRoom(Array.isArray(list) ? list : []);
     });
 
-    // admitted (host or guest)
     socket.on("join-approved", ({ role: r, participants: ids, waiting }) => {
       setIsWaiting(false);
       setRole(r || "guest");
       setMeetingStart(Date.now());
 
-      // waiting list (host)
       setWaitingRoom(Array.isArray(waiting) ? waiting : []);
 
-      // build participant names
       const cleanIds = Array.isArray(ids) ? ids : [];
       const mapped = cleanIds.map((id) => ({
         id,
         name: id === socket.id ? `${username} (You)` : `Guest-${id.slice(0, 5)}`,
       }));
       setParticipants(mapped);
-
-      // remote tiles
       setRemoteIds(cleanIds.filter((id) => id !== socket.id));
 
-      // attach local
-      if (window.localStream && localVideoRef.current) {
-        attachStream(localVideoRef.current, window.localStream, true);
-        localVideoRef.current.style.transform = "scaleX(-1)";
-      }
+      // init raisedHands keys
+      setRaisedHands((prev) => {
+        const next = { ...prev };
+        cleanIds.forEach((id) => {
+          if (next[id] === undefined) next[id] = false;
+        });
+        return next;
+      });
     });
 
     socket.on("denied", () => {
@@ -286,41 +390,48 @@ const attachStream = useCallback((el, stream, muted = false) => {
       handleEndCall(true);
     });
 
-    // participants list push (backend emits ids)
     socket.on("participants-update", (ids) => {
       const cleanIds = Array.isArray(ids) ? ids : [];
+
       setParticipants((prev) => {
         const meName = `${username} (You)`;
         const prevMap = new Map(prev.map((p) => [p.id, p.name]));
-
-        const next = cleanIds.map((id) => ({
+        return cleanIds.map((id) => ({
           id,
           name: id === socket.id ? meName : prevMap.get(id) || `Guest-${id.slice(0, 5)}`,
         }));
-        return next;
       });
 
       setRemoteIds(cleanIds.filter((id) => id !== socket.id));
+
+      setRaisedHands((prev) => {
+        const next = { ...prev };
+        cleanIds.forEach((id) => {
+          if (next[id] === undefined) next[id] = false;
+        });
+        // remove old
+        Object.keys(next).forEach((k) => {
+          if (!cleanIds.includes(k)) delete next[k];
+        });
+        return next;
+      });
     });
 
-    // when someone is admitted -> server tells everyone
     socket.on("user-joined", async (newUserId, roomClients) => {
-      // sync participants list (ids only)
       const ids = Array.isArray(roomClients) ? roomClients : [];
+
       setParticipants((prev) => {
         const prevMap = new Map(prev.map((p) => [p.id, p.name]));
         const meName = `${username} (You)`;
-
-        const next = ids.map((id) => ({
+        return ids.map((id) => ({
           id,
           name: id === socket.id ? meName : prevMap.get(id) || `Guest-${id.slice(0, 5)}`,
         }));
-        return next;
       });
 
       setRemoteIds(ids.filter((id) => id !== socket.id));
 
-      // IMPORTANT: existing users should create offer to the newly joined user
+      // create offer to new user
       if (newUserId !== socket.id) {
         const pc = peersRef.current[newUserId] || createPeer(newUserId);
         try {
@@ -355,17 +466,46 @@ const attachStream = useCallback((el, stream, muted = false) => {
 
     socket.on("chat-message", (data, sender) => {
       setMessages((prev) => [...prev, { sender: sender || "Guest", data }]);
-      if (!showChat) setNewMessages((p) => p + 1);
+      if (!showChatRef.current) setNewMessages((p) => p + 1);
     });
 
     socket.on("user-left", (id) => {
       cleanupPeer(id);
-      setMessages((prev) => [...prev, { sender: "System", data: `A user left`, type: "system" }]);
+      setMessages((prev) => [
+        ...prev,
+        { sender: "System", data: `A user left`, type: "system" },
+      ]);
+    });
+
+    // ✅ Hand raise broadcast
+    socket.on("hand-raise", ({ socketId, raised, name }) => {
+      setRaisedHands((prev) => ({ ...prev, [socketId]: !!raised }));
+      setMessages((msgs) => [
+        ...msgs,
+        {
+          sender: "System",
+          data: `${name || "Someone"} ${raised ? "raised" : "lowered"} hand`,
+          type: "system",
+        },
+      ]);
+    });
+
+    // ✅ Reaction broadcast
+    socket.on("reaction", ({ emoji, name }) => {
+      if (!emoji) return;
+      setFloatingReaction(emoji);
+      setMessages((prev) => [
+        ...prev,
+        { sender: name || "Guest", data: emoji, type: "reaction" },
+      ]);
+      setTimeout(() => setFloatingReaction(null), 2000);
     });
 
     socket.on("host-changed", () => {
-      // optional: you can show toast
-      setMessages((prev) => [...prev, { sender: "System", data: `Host changed`, type: "system" }]);
+      setMessages((prev) => [
+        ...prev,
+        { sender: "System", data: `Host changed`, type: "system" },
+      ]);
     });
 
     return () => {
@@ -375,15 +515,20 @@ const attachStream = useCallback((el, stream, muted = false) => {
       socketRef.current = null;
       closeAllPeers();
     };
-  }, [askForUsername, roomId, username, createPeer, cleanupPeer, closeAllPeers]);
+  }, [
+    askForUsername,
+    roomId,
+    username,
+    createPeer,
+    cleanupPeer,
+    closeAllPeers,
+    handleEndCall,
+  ]);
 
   // ---------------------------
   // actions
   // ---------------------------
-  const connect = () => {
-    setAskForUsername(false);
-    // meetingStart will set when join-approved
-  };
+  const connect = () => setAskForUsername(false);
 
   const admitUser = (targetId) => {
     if (!socketRef.current) return;
@@ -395,7 +540,6 @@ const attachStream = useCallback((el, stream, muted = false) => {
     socketRef.current.emit("deny-user", { roomId, targetId });
   };
 
-  // lobby camera/mic toggles
   const toggleLobbyCam = () => {
     const s = window.localStream;
     if (!s) return;
@@ -416,11 +560,10 @@ const attachStream = useCallback((el, stream, muted = false) => {
     setAudio(t.enabled);
   };
 
-  // meeting controls
   const handleVideo = () => {
     setVideo((prev) => {
       const next = !prev;
-      const s = window.localStream || localVideoRef.current?.srcObject;
+      const s = window.localStream;
       if (s) s.getVideoTracks().forEach((t) => (t.enabled = next));
       return next;
     });
@@ -429,73 +572,111 @@ const attachStream = useCallback((el, stream, muted = false) => {
   const handleAudio = () => {
     setAudio((prev) => {
       const next = !prev;
-      const s = window.localStream || localVideoRef.current?.srcObject;
+      const s = window.localStream;
       if (s) s.getAudioTracks().forEach((t) => (t.enabled = next));
       return next;
     });
   };
 
   const handleScreen = async () => {
-    if (!screen) {
-      try {
-        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-
-        if (localVideoRef.current) {
-          attachStream(localVideoRef.current, screenStream, true);
-          localVideoRef.current.style.transform = "none";
-        }
-
-        screenStream.getVideoTracks()[0].onended = () => {
-          setScreen(false);
-          if (window.localStream && localVideoRef.current) {
-            attachStream(localVideoRef.current, window.localStream, true);
-            localVideoRef.current.style.transform = "scaleX(-1)";
-          }
-        };
-
-        setScreen(true);
-      } catch {}
-    } else {
+    // STOP screen share
+    if (isScreenSharingRef.current) {
+      isScreenSharingRef.current = false;
       setScreen(false);
-      if (window.localStream && localVideoRef.current) {
+
+      try {
+        screenStreamRef.current?.getTracks?.().forEach((t) => t.stop());
+      } catch {}
+      screenStreamRef.current = null;
+
+      const camTrack = window.localStream?.getVideoTracks?.()?.[0];
+      if (camTrack) await replaceVideoTrackForAllPeers(camTrack);
+
+      // reattach local
+      if (localVideoRef.current && window.localStream) {
         attachStream(localVideoRef.current, window.localStream, true);
         localVideoRef.current.style.transform = "scaleX(-1)";
       }
-    }
-  };
-
-  const handleEndCall = (silent = false) => {
-    if (!silent) {
-      try {
-        const s = window.localStream;
-        if (s) s.getTracks().forEach((t) => t.stop());
-      } catch {}
+      return;
     }
 
+    // START screen share
     try {
-      socketRef.current?.disconnect();
-    } catch {}
+      const screenStream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+      });
 
-    closeAllPeers();
-    navigate("/home");
+      screenStreamRef.current = screenStream;
+      isScreenSharingRef.current = true;
+      setScreen(true);
+
+      const screenTrack = screenStream.getVideoTracks()[0];
+
+      if (screenTrack) await replaceVideoTrackForAllPeers(screenTrack);
+
+      // local preview show screen
+      if (localVideoRef.current) {
+        attachStream(localVideoRef.current, screenStream, true);
+        localVideoRef.current.style.transform = "none";
+      }
+
+      // when user stops from browser UI
+      screenTrack.onended = async () => {
+        if (!isScreenSharingRef.current) return;
+
+        isScreenSharingRef.current = false;
+        setScreen(false);
+
+        try {
+          screenStreamRef.current?.getTracks?.().forEach((t) => t.stop());
+        } catch {}
+        screenStreamRef.current = null;
+
+        const camTrack = window.localStream?.getVideoTracks?.()?.[0];
+        if (camTrack) await replaceVideoTrackForAllPeers(camTrack);
+
+        if (localVideoRef.current && window.localStream) {
+          attachStream(localVideoRef.current, window.localStream, true);
+          localVideoRef.current.style.transform = "scaleX(-1)";
+        }
+      };
+    } catch (e) {
+      console.error("screen share error:", e);
+    }
   };
 
   const toggleHandRaise = () => {
     setHandRaised((prev) => {
       const next = !prev;
+
+      // broadcast
+      socketRef.current?.emit("hand-raise", { raised: next, name: username });
+
+      // local update
+      setRaisedHands((m) => ({ ...m, [socketRef.current?.id]: next }));
       setMessages((msgs) => [
         ...msgs,
-        { sender: "System", data: `${username} ${next ? "raised" : "lowered"} their hand`, type: "system" },
+        {
+          sender: "System",
+          data: `${username} ${next ? "raised" : "lowered"} their hand`,
+          type: "system",
+        },
       ]);
+
       return next;
     });
   };
 
   const sendReaction = (emoji) => {
+    if (!emoji) return;
+
+    // instant local
     setFloatingReaction(emoji);
     setShowReactions(false);
-    setMessages((prev) => [...prev, { sender: username, data: emoji, type: "reaction" }]);
     setTimeout(() => setFloatingReaction(null), 2000);
+
+    // broadcast
+    socketRef.current?.emit("reaction", { emoji, name: username });
   };
 
   const sendMessage = () => {
@@ -507,14 +688,20 @@ const attachStream = useCallback((el, stream, muted = false) => {
   const handleFileSelect = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
     const reader = new FileReader();
     reader.onload = () => {
       const isImage = file.type.startsWith("image/");
       setMessages((prev) => [
         ...prev,
-        { sender: username, data: reader.result, type: isImage ? "image" : "file", fileName: file.name },
+        {
+          sender: username,
+          data: reader.result,
+          type: isImage ? "image" : "file",
+          fileName: file.name,
+        },
       ]);
-      if (!showChat) setNewMessages((p) => p + 1);
+      if (!showChatRef.current) setNewMessages((p) => p + 1);
     };
     reader.readAsDataURL(file);
     e.target.value = "";
@@ -524,7 +711,13 @@ const attachStream = useCallback((el, stream, muted = false) => {
     setIsRecording((prev) => {
       setMessages((msgs) => [
         ...msgs,
-        { sender: "System", data: prev ? "Recording stopped (UI only)" : "Recording started (UI only)", type: "system" },
+        {
+          sender: "System",
+          data: prev
+            ? "Recording stopped (UI only)"
+            : "Recording started (UI only)",
+          type: "system",
+        },
       ]);
       return !prev;
     });
@@ -535,8 +728,15 @@ const attachStream = useCallback((el, stream, muted = false) => {
     const cleaned = pollOptions.map((o) => o.trim()).filter(Boolean);
     if (!pollQuestion.trim() || cleaned.length < 2) return;
 
-    setActivePoll({ question: pollQuestion, options: cleaned, votes: cleaned.map(() => 0) });
-    setMessages((prev) => [...prev, { sender: "System", data: `Poll: "${pollQuestion}"`, type: "system" }]);
+    setActivePoll({
+      question: pollQuestion,
+      options: cleaned,
+      votes: cleaned.map(() => 0),
+    });
+    setMessages((prev) => [
+      ...prev,
+      { sender: "System", data: `Poll: "${pollQuestion}"`, type: "system" },
+    ]);
 
     setPollQuestion("");
     setPollOptions(["", ""]);
@@ -575,13 +775,27 @@ const attachStream = useCallback((el, stream, muted = false) => {
       <div className="lobbyContainer">
         <header className="lobbyHeader">
           <div className="lobbyHeader-brand">
-            <div className="navLogo" style={{ width: 32, height: 32, borderRadius: 8 }} />
+            <div
+              className="navLogo"
+              style={{ width: 32, height: 32, borderRadius: 8 }}
+            />
             <span>AirMeet</span>
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <div style={{ padding: "4px 12px", borderRadius: 8, background: "var(--bg-secondary)", fontSize: "0.8rem", color: "var(--text-muted)" }}>
-              Meeting: <span style={{ color: "var(--primary)", fontWeight: 600 }}>{roomId}</span>
+            <div
+              style={{
+                padding: "4px 12px",
+                borderRadius: 8,
+                background: "var(--bg-secondary)",
+                fontSize: "0.8rem",
+                color: "var(--text-muted)",
+              }}
+            >
+              Meeting:{" "}
+              <span style={{ color: "var(--primary)", fontWeight: 600 }}>
+                {roomId}
+              </span>
             </div>
           </div>
         </header>
@@ -590,12 +804,30 @@ const attachStream = useCallback((el, stream, muted = false) => {
           <div className="lobby-preview">
             <div className="lobby-preview-card">
               <div className="lobby-video-wrapper">
-                <video ref={localVideoRef} autoPlay muted playsInline style={{ transform: "scaleX(-1)" }} />
+                <video
+                  ref={setLocalVideoEl}
+                  autoPlay
+                  muted
+                  playsInline
+                  style={{ transform: "scaleX(-1)" }}
+                />
                 <div className="lobby-video-controls">
-                  <button className={`lobby-control-btn ${videoAvailable ? "on" : "off"}`} onClick={toggleLobbyCam} disabled={!window.localStream}>
+                  <button
+                    className={`lobby-control-btn ${
+                      videoAvailable ? "on" : "off"
+                    }`}
+                    onClick={toggleLobbyCam}
+                    disabled={!window.localStream}
+                  >
                     Camera
                   </button>
-                  <button className={`lobby-control-btn ${audioAvailable ? "on" : "off"}`} onClick={toggleLobbyMic} disabled={!window.localStream}>
+                  <button
+                    className={`lobby-control-btn ${
+                      audioAvailable ? "on" : "off"
+                    }`}
+                    onClick={toggleLobbyMic}
+                    disabled={!window.localStream}
+                  >
                     Mic
                   </button>
                 </div>
@@ -619,7 +851,11 @@ const attachStream = useCallback((el, stream, muted = false) => {
                     onKeyDown={(e) => e.key === "Enter" && username.trim() && connect()}
                   />
                 </div>
-                <button className="lobby-join-btn" onClick={connect} disabled={!username.trim()}>
+                <button
+                  className="lobby-join-btn"
+                  onClick={connect}
+                  disabled={!username.trim()}
+                >
                   Continue
                 </button>
               </div>
@@ -635,8 +871,19 @@ const attachStream = useCallback((el, stream, muted = false) => {
   // ---------------------------
   if (isWaiting) {
     return (
-      <div className="lobbyContainer" style={{ display: "grid", placeItems: "center", minHeight: "100vh" }}>
-        <div style={{ maxWidth: 520, padding: 24, borderRadius: 16, background: "var(--bg-card)", border: "1px solid var(--border)" }}>
+      <div
+        className="lobbyContainer"
+        style={{ display: "grid", placeItems: "center", minHeight: "100vh" }}
+      >
+        <div
+          style={{
+            maxWidth: 520,
+            padding: 24,
+            borderRadius: 16,
+            background: "var(--bg-card)",
+            border: "1px solid var(--border)",
+          }}
+        >
           <h2 style={{ marginBottom: 8 }}>Waiting for host approval…</h2>
           <p style={{ color: "var(--text-muted)", marginBottom: 16 }}>
             You are in the waiting room for <b>{roomId}</b>. Host will admit you.
@@ -664,17 +911,33 @@ const attachStream = useCallback((el, stream, muted = false) => {
 
       <header className="meetHeader">
         <div className="meetHeader-left">
-          <span className="meetHeader-title" style={{ cursor: "pointer" }} onClick={() => setShowTitleModal(true)}>
+          <span
+            className="meetHeader-title"
+            style={{ cursor: "pointer" }}
+            onClick={() => setShowTitleModal(true)}
+          >
             {meetingTitle || "AirMeet Meeting"}
           </span>
           <div className="meetHeader-badge">E2E Encrypted</div>
-          <div className="meetHeader-badge" style={{ marginLeft: 8 }}>{role === "host" ? "Host" : "Guest"}</div>
+          <div className="meetHeader-badge" style={{ marginLeft: 8 }}>
+            {role === "host" ? "Host" : "Guest"}
+          </div>
         </div>
 
         <div className="meetHeader-right">
           <div className="layout-switcher">
-            <button className={`layout-btn ${layout === "grid" ? "active" : ""}`} onClick={() => setLayout("grid")}>Grid</button>
-            <button className={`layout-btn ${layout === "speaker" ? "active" : ""}`} onClick={() => setLayout("speaker")}>Speaker</button>
+            <button
+              className={`layout-btn ${layout === "grid" ? "active" : ""}`}
+              onClick={() => setLayout("grid")}
+            >
+              Grid
+            </button>
+            <button
+              className={`layout-btn ${layout === "speaker" ? "active" : ""}`}
+              onClick={() => setLayout("speaker")}
+            >
+              Speaker
+            </button>
           </div>
         </div>
       </header>
@@ -682,30 +945,65 @@ const attachStream = useCallback((el, stream, muted = false) => {
       <div className="meetBody">
         <div className="meetMain">
           {activePoll && (
-            <div style={{ marginBottom: 12, padding: 16, borderRadius: "var(--radius)", background: "var(--bg-card)", border: "1px solid var(--border)" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-                <span style={{ fontSize: "0.875rem", fontWeight: 600 }}>Poll: {activePoll.question}</span>
-                <button style={{ fontSize: "0.7rem", color: "var(--text-muted)" }} onClick={() => { setActivePoll(null); setMyVote(null); }}>
+            <div
+              style={{
+                marginBottom: 12,
+                padding: 16,
+                borderRadius: "var(--radius)",
+                background: "var(--bg-card)",
+                border: "1px solid var(--border)",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  marginBottom: 12,
+                }}
+              >
+                <span style={{ fontSize: "0.875rem", fontWeight: 600 }}>
+                  Poll: {activePoll.question}
+                </span>
+                <button
+                  style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}
+                  onClick={() => {
+                    setActivePoll(null);
+                    setMyVote(null);
+                  }}
+                >
                   Dismiss
                 </button>
               </div>
 
               {activePoll.options.map((opt, i) => {
                 const totalVotes = activePoll.votes.reduce((a, b) => a + b, 0);
-                const pct = totalVotes > 0 ? Math.round((activePoll.votes[i] / totalVotes) * 100) : 0;
+                const pct =
+                  totalVotes > 0
+                    ? Math.round((activePoll.votes[i] / totalVotes) * 100)
+                    : 0;
 
                 return (
-                  <div key={i} className={`poll-option ${myVote === i ? "selected" : ""}`} onClick={() => votePoll(i)}>
+                  <div
+                    key={i}
+                    className={`poll-option ${myVote === i ? "selected" : ""}`}
+                    onClick={() => votePoll(i)}
+                  >
                     <div className="poll-option-radio" />
                     <div style={{ flex: 1 }}>
                       <div className="poll-option-text">{opt}</div>
                       {myVote !== null && (
                         <div className="poll-results-bar">
-                          <div className="poll-results-fill" style={{ width: `${pct}%` }} />
+                          <div
+                            className="poll-results-fill"
+                            style={{ width: `${pct}%` }}
+                          />
                         </div>
                       )}
                     </div>
-                    {myVote !== null && <span className="poll-option-count">{pct}%</span>}
+                    {myVote !== null && (
+                      <span className="poll-option-count">{pct}%</span>
+                    )}
                   </div>
                 );
               })}
@@ -716,8 +1014,10 @@ const attachStream = useCallback((el, stream, muted = false) => {
             <div className={`videoGrid ${getGridClass()}`}>
               {/* Local */}
               <div className="participantTile">
-                {handRaised && <div className="hand-raise-indicator">{"\u270B"}</div>}
-                <video ref={localVideoRef} autoPlay muted playsInline style={{ transform: "scaleX(-1)" }} />
+                {handRaised && (
+                  <div className="hand-raise-indicator">{"\u270B"}</div>
+                )}
+                <video ref={setLocalVideoEl} autoPlay muted playsInline />
                 <div className="participantTile-info">
                   <div className="participantTile-name">
                     <span>{username} (You)</span>
@@ -729,8 +1029,13 @@ const attachStream = useCallback((el, stream, muted = false) => {
               {/* Remotes */}
               {remoteIds.map((id) => (
                 <div className="participantTile" key={id}>
+                  {raisedHands[id] && (
+                    <div className="hand-raise-indicator">{"\u270B"}</div>
+                  )}
                   <video
-                    ref={(el) => { if (el) remoteVideoRefs.current[id] = el; }}
+                    ref={(el) => {
+                      if (el) remoteVideoRefs.current[id] = el;
+                    }}
                     autoPlay
                     playsInline
                     style={{ width: "100%", height: "100%", objectFit: "cover" }}
@@ -747,11 +1052,16 @@ const attachStream = useCallback((el, stream, muted = false) => {
             <div className="speakerView">
               <div className="speakerMain">
                 <video
-                  ref={localVideoRef}
+                  ref={setLocalVideoEl}
                   autoPlay
                   muted
                   playsInline
-                  style={{ width: "100%", height: "100%", objectFit: "cover", transform: screen ? "none" : "scaleX(-1)" }}
+                  style={{
+                    width: "100%",
+                    height: "100%",
+                    objectFit: "cover",
+                    transform: screen ? "none" : "scaleX(-1)",
+                  }}
                 />
                 <div className="speakerMain-info">
                   <div className="speakerMain-name">{username}</div>
@@ -766,24 +1076,53 @@ const attachStream = useCallback((el, stream, muted = false) => {
           <div className="meetSidebar">
             <div className="sidePanel-header">
               <h3>Chat</h3>
-              <button className="sidePanel-close" onClick={() => setShowChat(false)}>X</button>
+              <button className="sidePanel-close" onClick={() => setShowChat(false)}>
+                X
+              </button>
             </div>
 
             <div className="chatMessages">
               {messages.map((item, index) => (
                 <div key={index}>
                   {item.type === "system" ? (
-                    <div style={{ textAlign: "center", margin: "12px 0", fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                    <div
+                      style={{
+                        textAlign: "center",
+                        margin: "12px 0",
+                        fontSize: "0.75rem",
+                        color: "var(--text-muted)",
+                      }}
+                    >
                       {item.data}
                     </div>
                   ) : item.type === "reaction" ? (
-                    <div style={{ textAlign: "center", margin: "8px 0", fontSize: "1.5rem" }}>{item.data}</div>
+                    <div style={{ textAlign: "center", margin: "8px 0", fontSize: "1.5rem" }}>
+                      {item.data}
+                    </div>
                   ) : item.type === "image" ? (
                     <div className={`chatMessage ${item.sender === username ? "isMe" : ""}`}>
                       <div className="chatMessage-content">
-                        <div className={`chatMessage-bubble ${item.sender === username ? "me" : "other"}`} style={{ padding: 4 }}>
-                          <img src={item.data} alt={item.fileName} style={{ maxWidth: "100%", borderRadius: 8, display: "block" }} />
-                          <div style={{ fontSize: "0.7rem", color: "var(--text-muted)", marginTop: 4, padding: "0 4px" }}>
+                        <div
+                          className={`chatMessage-bubble ${item.sender === username ? "me" : "other"}`}
+                          style={{ padding: 4 }}
+                        >
+                          <img
+                            src={item.data}
+                            alt={item.fileName}
+                            style={{
+                              maxWidth: "100%",
+                              borderRadius: 8,
+                              display: "block",
+                            }}
+                          />
+                          <div
+                            style={{
+                              fontSize: "0.7rem",
+                              color: "var(--text-muted)",
+                              marginTop: 4,
+                              padding: "0 4px",
+                            }}
+                          >
                             {item.fileName}
                           </div>
                         </div>
@@ -804,7 +1143,9 @@ const attachStream = useCallback((el, stream, muted = false) => {
 
             <div className="chatInput">
               <div className="chatInput-wrapper">
-                <button onClick={() => fileInputRef.current?.click()} title="Attach">+</button>
+                <button onClick={() => fileInputRef.current?.click()} title="Attach">
+                  +
+                </button>
                 <input
                   type="text"
                   placeholder="Type a message..."
@@ -825,7 +1166,9 @@ const attachStream = useCallback((el, stream, muted = false) => {
           <div className="meetSidebar">
             <div className="sidePanel-header">
               <h3>Participants ({participants.length})</h3>
-              <button className="sidePanel-close" onClick={() => setShowParticipants(false)}>X</button>
+              <button className="sidePanel-close" onClick={() => setShowParticipants(false)}>
+                X
+              </button>
             </div>
 
             <div className="participantsList-search" style={{ padding: "12px 16px" }}>
@@ -845,13 +1188,19 @@ const attachStream = useCallback((el, stream, muted = false) => {
               />
             </div>
 
-            {/* WAITING ROOM (Host Only) ✅ */}
+            {/* WAITING ROOM (Host Only) */}
             {role === "host" && waitingRoom.length > 0 && (
               <div style={{ padding: "0 16px 12px" }}>
-                <p style={{ color: "var(--primary)", marginBottom: 8 }}>Waiting to join ({waitingRoom.length})</p>
+                <p style={{ color: "var(--primary)", marginBottom: 8 }}>
+                  Waiting to join ({waitingRoom.length})
+                </p>
 
                 {waitingRoom.map((p) => (
-                  <div key={p.id} className="participantsList-item" style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                  <div
+                    key={p.id}
+                    className="participantsList-item"
+                    style={{ display: "flex", justifyContent: "space-between", gap: 8 }}
+                  >
                     <span>{p.name}</span>
                     <div style={{ display: "flex", gap: 8 }}>
                       <button onClick={() => admitUser(p.id)}>Admit</button>
@@ -872,7 +1221,13 @@ const attachStream = useCallback((el, stream, muted = false) => {
                 ))}
             </div>
 
-            <button className="invite-btn" onClick={() => { setShowInviteModal(true); setShowParticipants(false); }}>
+            <button
+              className="invite-btn"
+              onClick={() => {
+                setShowInviteModal(true);
+                setShowParticipants(false);
+              }}
+            >
               Invite People
             </button>
           </div>
@@ -887,7 +1242,9 @@ const attachStream = useCallback((el, stream, muted = false) => {
           <div className="reactions-popup">
             <div className="reactions-popup-inner">
               {["👍", "👏", "❤️", "😂", "😮", "🎉", "🔥", "💯"].map((e) => (
-                <button key={e} className="reaction-btn" onClick={() => sendReaction(e)}>{e}</button>
+                <button key={e} className="reaction-btn" onClick={() => sendReaction(e)}>
+                  {e}
+                </button>
               ))}
             </div>
           </div>
@@ -899,10 +1256,22 @@ const attachStream = useCallback((el, stream, muted = false) => {
               <button className="more-popup-item" onClick={toggleRecording}>
                 {isRecording ? "Stop Recording" : "Start Recording"}
               </button>
-              <button className="more-popup-item" onClick={() => { setShowPollModal(true); setShowMore(false); }}>
+              <button
+                className="more-popup-item"
+                onClick={() => {
+                  setShowPollModal(true);
+                  setShowMore(false);
+                }}
+              >
                 Polls
               </button>
-              <button className="more-popup-item" onClick={() => { setShowSettingsModal(true); setShowMore(false); }}>
+              <button
+                className="more-popup-item"
+                onClick={() => {
+                  setShowSettingsModal(true);
+                  setShowMore(false);
+                }}
+              >
                 Settings
               </button>
             </div>
@@ -911,7 +1280,10 @@ const attachStream = useCallback((el, stream, muted = false) => {
 
         <div className="meetControls-left">
           <div className="meetControls-timer">
-            <span>{isRecording ? "REC " : ""}{meetingTime}</span>
+            <span>
+              {isRecording ? "REC " : ""}
+              {meetingTime}
+            </span>
           </div>
           <button className="meetControls-meta-btn" onClick={copyMeetingLink}>
             {copied ? "Copied!" : "Copy Link"}
@@ -919,22 +1291,64 @@ const attachStream = useCallback((el, stream, muted = false) => {
         </div>
 
         <div className="meetControls-center">
-          <button className={`control-btn ${audio ? "default" : "off"}`} onClick={handleAudio}>Mic</button>
-          <button className={`control-btn ${video ? "default" : "off"}`} onClick={handleVideo}>Cam</button>
-          <button className={`control-btn ${screen ? "active" : "default"}`} onClick={handleScreen}>Screen</button>
-          <button className={`control-btn ${handRaised ? "active" : "default"}`} onClick={toggleHandRaise}>Hand</button>
+          <button className={`control-btn ${audio ? "default" : "off"}`} onClick={handleAudio}>
+            Mic
+          </button>
+          <button className={`control-btn ${video ? "default" : "off"}`} onClick={handleVideo}>
+            Cam
+          </button>
+          <button className={`control-btn ${screen ? "active" : "default"}`} onClick={handleScreen}>
+            Screen
+          </button>
+          <button
+            className={`control-btn ${handRaised ? "active" : "default"}`}
+            onClick={toggleHandRaise}
+          >
+            Hand
+          </button>
 
-          <button className="control-btn default" onClick={() => { setShowReactions((p) => !p); setShowMore(false); }}>🙂</button>
-          <button className="control-btn default" onClick={() => { setShowMore((p) => !p); setShowReactions(false); }}>⋯</button>
+          <button
+            className="control-btn default"
+            onClick={() => {
+              setShowReactions((p) => !p);
+              setShowMore(false);
+            }}
+          >
+            🙂
+          </button>
+          <button
+            className="control-btn default"
+            onClick={() => {
+              setShowMore((p) => !p);
+              setShowReactions(false);
+            }}
+          >
+            ⋯
+          </button>
 
-          <button className="control-end-btn" onClick={() => handleEndCall(false)}>End</button>
+          <button className="control-end-btn" onClick={() => handleEndCall(false)}>
+            End
+          </button>
         </div>
 
         <div className="meetControls-right">
-          <button className={`panel-toggle-btn ${showParticipants ? "active" : ""}`} onClick={() => { setShowParticipants((p) => !p); setShowChat(false); }}>
+          <button
+            className={`panel-toggle-btn ${showParticipants ? "active" : ""}`}
+            onClick={() => {
+              setShowParticipants((p) => !p);
+              setShowChat(false);
+            }}
+          >
             People ({participants.length})
           </button>
-          <button className={`panel-toggle-btn ${showChat ? "active" : ""}`} onClick={() => { setShowChat((p) => !p); setShowParticipants(false); setNewMessages(0); }}>
+          <button
+            className={`panel-toggle-btn ${showChat ? "active" : ""}`}
+            onClick={() => {
+              setShowChat((p) => !p);
+              setShowParticipants(false);
+              setNewMessages(0);
+            }}
+          >
             Chat {newMessages > 0 ? `(${newMessages})` : ""}
           </button>
         </div>
@@ -942,7 +1356,10 @@ const attachStream = useCallback((el, stream, muted = false) => {
 
       {/* INVITE MODAL */}
       {showInviteModal && (
-        <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setShowInviteModal(false)}>
+        <div
+          className="modal-overlay"
+          onClick={(e) => e.target === e.currentTarget && setShowInviteModal(false)}
+        >
           <div className="modal-card">
             <h2>Invite People</h2>
 
@@ -969,14 +1386,19 @@ const attachStream = useCallback((el, stream, muted = false) => {
               </button>
             </div>
 
-            <button className="modal-btn-primary" onClick={() => setShowInviteModal(false)}>Close</button>
+            <button className="modal-btn-primary" onClick={() => setShowInviteModal(false)}>
+              Close
+            </button>
           </div>
         </div>
       )}
 
       {/* POLL MODAL */}
       {showPollModal && (
-        <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setShowPollModal(false)}>
+        <div
+          className="modal-overlay"
+          onClick={(e) => e.target === e.currentTarget && setShowPollModal(false)}
+        >
           <div className="modal-card">
             <h2>Create a Poll</h2>
 
@@ -995,20 +1417,29 @@ const attachStream = useCallback((el, stream, muted = false) => {
                   }}
                 />
                 {pollOptions.length > 2 && (
-                  <button className="modal-btn-cancel" onClick={() => setPollOptions(pollOptions.filter((_, j) => j !== i))}>
+                  <button
+                    className="modal-btn-cancel"
+                    onClick={() => setPollOptions(pollOptions.filter((_, j) => j !== i))}
+                  >
                     Remove
-                   </button>
+                  </button>
                 )}
               </div>
             ))}
 
             {pollOptions.length < 6 && (
-              <button className="modal-btn-primary" onClick={() => setPollOptions([...pollOptions, ""])}>+ Add option</button>
+              <button className="modal-btn-primary" onClick={() => setPollOptions([...pollOptions, ""])}>
+                + Add option
+              </button>
             )}
 
             <div className="modal-actions">
-              <button className="modal-btn-cancel" onClick={() => setShowPollModal(false)}>Cancel</button>
-              <button className="modal-btn-primary" onClick={createPoll}>Launch Poll</button>
+              <button className="modal-btn-cancel" onClick={() => setShowPollModal(false)}>
+                Cancel
+              </button>
+              <button className="modal-btn-primary" onClick={createPoll}>
+                Launch Poll
+              </button>
             </div>
           </div>
         </div>
@@ -1016,7 +1447,10 @@ const attachStream = useCallback((el, stream, muted = false) => {
 
       {/* SETTINGS MODAL */}
       {showSettingsModal && (
-        <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setShowSettingsModal(false)}>
+        <div
+          className="modal-overlay"
+          onClick={(e) => e.target === e.currentTarget && setShowSettingsModal(false)}
+        >
           <div className="modal-card">
             <h2>Meeting Settings</h2>
 
@@ -1045,7 +1479,9 @@ const attachStream = useCallback((el, stream, muted = false) => {
             </div>
 
             <div className="modal-actions">
-              <button className="modal-btn-primary" onClick={() => setShowSettingsModal(false)}>Done</button>
+              <button className="modal-btn-primary" onClick={() => setShowSettingsModal(false)}>
+                Done
+              </button>
             </div>
           </div>
         </div>
@@ -1053,7 +1489,10 @@ const attachStream = useCallback((el, stream, muted = false) => {
 
       {/* TITLE MODAL */}
       {showTitleModal && (
-        <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setShowTitleModal(false)}>
+        <div
+          className="modal-overlay"
+          onClick={(e) => e.target === e.currentTarget && setShowTitleModal(false)}
+        >
           <div className="modal-card">
             <h2>Edit Meeting Title</h2>
 
@@ -1064,7 +1503,9 @@ const attachStream = useCallback((el, stream, muted = false) => {
             />
 
             <div className="modal-actions">
-              <button className="modal-btn-cancel" onClick={() => setShowTitleModal(false)}>Cancel</button>
+              <button className="modal-btn-cancel" onClick={() => setShowTitleModal(false)}>
+                Cancel
+              </button>
               <button
                 className="modal-btn-primary"
                 onClick={() => {
