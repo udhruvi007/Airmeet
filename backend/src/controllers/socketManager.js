@@ -1,21 +1,33 @@
+// socketmanager.js
 import { Server } from "socket.io";
 
-let connections = {};   // roomId -> [socketId... admitted users]
-let waiting = {};       // roomId -> [{id,name,joinedAt}]
-let messages = {};      // roomId -> [{sender,data,socketIdSender}]
-let timeOnline = {};    // socketId -> Date
-let socketMeta = {};    // socketId -> { roomId, name, role }
-let roomHost = {};      // roomId -> hostSocketId
+let connections = {}; // roomId -> [socketId... admitted users]
+let waiting = {}; // roomId -> [{id,name,joinedAt}]
+let messages = {}; // roomId -> [{sender,data,socketIdSender}]
+let timeOnline = {}; // socketId -> Date
+let socketMeta = {}; // socketId -> { roomId, name, role }
+let roomHost = {}; // roomId -> hostSocketId
 
 export const connectToSocket = (server) => {
+  // ✅ allow Netlify + localhost both
+  const allowedOrigins = [process.env.FRONTEND_URL, "http://localhost:3000"].filter(Boolean);
+
   const io = new Server(server, {
     cors: {
-      origin: process.env.FRONTEND_URL,
+      origin: allowedOrigins,
       methods: ["GET", "POST"],
       credentials: true,
     },
+    // ✅ on Render websocket kabhi-kabhi drop hota hai, polling fallback helpful
+    transports: ["websocket", "polling"],
   });
 
+  // ---------------------------
+  // helpers (safe)
+  // ---------------------------
+  const safeId = (x) => (typeof x === "string" ? x : String(x ?? ""));
+  const shortId = (x) => safeId(x).slice(0, 5);
+  const safeName = (n) => (typeof n === "string" ? n.trim() : "");
   const findRoomOfSocket = (sid) => socketMeta[sid]?.roomId || "";
 
   const ensureRoomArrays = (roomId) => {
@@ -24,13 +36,14 @@ export const connectToSocket = (server) => {
     if (!messages[roomId]) messages[roomId] = [];
   };
 
+  // ✅ frontend ko ids nahi, proper objects bhejo {id,name,role}
   const buildParticipantsPayload = (roomId) => {
     const ids = connections[roomId] || [];
     return ids
       .filter(Boolean)
       .map((sid) => ({
         id: sid,
-        name: socketMeta[sid]?.name || `Guest-${sid.slice(0, 5)}`,
+        name: safeName(socketMeta[sid]?.name) || `Guest-${shortId(sid)}`,
         role: socketMeta[sid]?.role || "guest",
       }));
   };
@@ -44,7 +57,6 @@ export const connectToSocket = (server) => {
   const emitParticipantsUpdate = (roomId) => {
     const ids = connections[roomId] || [];
     const payload = buildParticipantsPayload(roomId);
-
     ids.forEach((sid) => {
       if (sid) io.to(sid).emit("participants-update", payload);
     });
@@ -54,16 +66,18 @@ export const connectToSocket = (server) => {
     console.log("SOCKET CONNECTED:", socket.id);
     timeOnline[socket.id] = new Date();
 
-    // JOIN FLOW
+    // ---------------------------
+    // JOIN FLOW (waiting room)
+    // ---------------------------
     socket.on("join-room", ({ roomId, name }) => {
       if (!roomId) return;
 
       ensureRoomArrays(roomId);
 
-      // If this socket already had a meta (rare), overwrite safely
+      // save meta safely
       socketMeta[socket.id] = {
         roomId,
-        name: (name || "Guest").trim(),
+        name: safeName(name) || "Guest",
         role: "guest",
       };
 
@@ -72,7 +86,7 @@ export const connectToSocket = (server) => {
         roomHost[roomId] = socket.id;
         socketMeta[socket.id].role = "host";
 
-        // ✅ prevent duplicates
+        // prevent duplicates
         if (!connections[roomId].includes(socket.id)) {
           connections[roomId].push(socket.id);
         }
@@ -83,7 +97,7 @@ export const connectToSocket = (server) => {
           waiting: waiting[roomId] || [],
         });
 
-        // replay chat
+        // replay chat history
         (messages[roomId] || []).forEach((m) => {
           io.to(socket.id).emit("chat-message", m.data, m.sender, m.socketIdSender);
         });
@@ -94,7 +108,7 @@ export const connectToSocket = (server) => {
       }
 
       // room exists => waiting room
-      // ✅ ensure not already in waiting
+      // ensure not duplicate in waiting
       waiting[roomId] = (waiting[roomId] || []).filter((p) => p.id !== socket.id);
       waiting[roomId].push({
         id: socket.id,
@@ -106,28 +120,32 @@ export const connectToSocket = (server) => {
       emitWaitingUpdate(roomId);
     });
 
-    // Host admits user
+    // ---------------------------
+    // HOST admits user
+    // ---------------------------
     socket.on("admit-user", ({ roomId, targetId }) => {
       if (!roomId || !targetId) return;
       ensureRoomArrays(roomId);
 
+      // only host
       if (roomHost[roomId] !== socket.id) return;
 
       const list = waiting[roomId] || [];
       const person = list.find((p) => p.id === targetId);
       if (!person) return;
 
+      // remove from waiting
       waiting[roomId] = list.filter((p) => p.id !== targetId);
 
-      // ✅ prevent duplicates
+      // add to admitted list (no dup)
       if (!connections[roomId].includes(targetId)) {
         connections[roomId].push(targetId);
       }
 
-      // make sure meta exists + role
+      // ensure target meta exists
       socketMeta[targetId] = {
         roomId,
-        name: (socketMeta[targetId]?.name || person.name || "Guest").trim(),
+        name: safeName(socketMeta[targetId]?.name) || safeName(person.name) || "Guest",
         role: "guest",
       };
 
@@ -137,12 +155,12 @@ export const connectToSocket = (server) => {
         waiting: waiting[roomId] || [],
       });
 
-      // notify
+      // notify everyone someone joined
       (connections[roomId] || []).forEach((sid) => {
         if (sid) io.to(sid).emit("user-joined", targetId, buildParticipantsPayload(roomId));
       });
 
-      // replay chat
+      // replay chat to admitted user
       (messages[roomId] || []).forEach((m) => {
         io.to(targetId).emit("chat-message", m.data, m.sender, m.socketIdSender);
       });
@@ -151,7 +169,9 @@ export const connectToSocket = (server) => {
       emitParticipantsUpdate(roomId);
     });
 
-    // Host denies user
+    // ---------------------------
+    // HOST denies user
+    // ---------------------------
     socket.on("deny-user", ({ roomId, targetId }) => {
       if (!roomId || !targetId) return;
       if (roomHost[roomId] !== socket.id) return;
@@ -161,12 +181,16 @@ export const connectToSocket = (server) => {
       emitWaitingUpdate(roomId);
     });
 
-    // WebRTC signaling
+    // ---------------------------
+    // WebRTC signaling (unchanged)
+    // ---------------------------
     socket.on("signal", (toId, message) => {
       io.to(toId).emit("signal", socket.id, message);
     });
 
-    // Chat
+    // ---------------------------
+    // Chat (admitted only)
+    // ---------------------------
     socket.on("chat-message", (data, sender) => {
       const roomId = findRoomOfSocket(socket.id);
       if (!roomId) return;
@@ -182,7 +206,9 @@ export const connectToSocket = (server) => {
       });
     });
 
-    // Hand raise
+    // ---------------------------
+    // Hand raise broadcast (admitted only)
+    // ---------------------------
     socket.on("hand-raise", ({ raised, name }) => {
       const roomId = findRoomOfSocket(socket.id);
       if (!roomId) return;
@@ -190,18 +216,22 @@ export const connectToSocket = (server) => {
       const admitted = (connections[roomId] || []).includes(socket.id);
       if (!admitted) return;
 
+      const finalName = safeName(name) || safeName(socketMeta[socket.id]?.name) || "Guest";
+
       (connections[roomId] || []).forEach((sid) => {
         if (sid) {
           io.to(sid).emit("hand-raise", {
             id: socket.id,
-            name: (name || socketMeta[socket.id]?.name || "Guest").trim(),
+            name: finalName,
             raised: !!raised,
           });
         }
       });
     });
 
-    // Reaction
+    // ---------------------------
+    // Reaction broadcast (admitted only)
+    // ---------------------------
     socket.on("reaction", ({ emoji, name }) => {
       const roomId = findRoomOfSocket(socket.id);
       if (!roomId) return;
@@ -209,17 +239,22 @@ export const connectToSocket = (server) => {
       const admitted = (connections[roomId] || []).includes(socket.id);
       if (!admitted) return;
 
+      const finalName = safeName(name) || safeName(socketMeta[socket.id]?.name) || "Guest";
+
       (connections[roomId] || []).forEach((sid) => {
         if (sid) {
           io.to(sid).emit("reaction", {
             id: socket.id,
-            name: (name || socketMeta[socket.id]?.name || "Guest").trim(),
+            name: finalName,
             emoji,
           });
         }
       });
     });
 
+    // ---------------------------
+    // Disconnect cleanup
+    // ---------------------------
     socket.on("disconnect", () => {
       const roomId = findRoomOfSocket(socket.id);
 
@@ -234,12 +269,12 @@ export const connectToSocket = (server) => {
         if (connections[roomId]) {
           connections[roomId] = connections[roomId].filter((id) => id !== socket.id);
 
-          // tell others
+          // tell others user left
           (connections[roomId] || []).forEach((sid) => {
             if (sid) io.to(sid).emit("user-left", socket.id);
           });
 
-          // host left -> new host or cleanup
+          // if host left -> assign new host or cleanup
           if (roomHost[roomId] === socket.id) {
             const newHost = connections[roomId][0];
             if (newHost) {
@@ -253,7 +288,7 @@ export const connectToSocket = (server) => {
               delete messages[roomId];
             }
           } else {
-            if (connections[roomId].length === 0) {
+            if ((connections[roomId] || []).length === 0) {
               delete connections[roomId];
               delete waiting[roomId];
               delete messages[roomId];

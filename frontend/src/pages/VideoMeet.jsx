@@ -8,7 +8,8 @@ const iceServers = [{ urls: "stun:stun.l.google.com:19302" }];
 export default function VideoMeet() {
   const { roomId } = useParams();
   const navigate = useNavigate();
-
+const safeId = (x) => (typeof x === "string" ? x : String(x || ""));
+const shortId = (x) => safeId(x).slice(0, 5);
   // DOM refs
   const localVideoRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -339,10 +340,12 @@ const didConnectRef = useRef(false);
   didConnectRef.current = true;
 
     const socket = io(SERVER_URL, {
-      transports: ["websocket"],
-      reconnection: true,
-    });
-
+  transports: ["websocket", "polling"], // ✅ allow fallback
+  reconnection: true,
+  reconnectionAttempts: 10,
+  reconnectionDelay: 1000,
+  timeout: 20000,
+});
     socketRef.current = socket;
 
     socket.on("connect", () => {
@@ -369,7 +372,7 @@ const didConnectRef = useRef(false);
       const cleanIds = Array.isArray(ids) ? ids : [];
       const mapped = cleanIds.map((id) => ({
         id,
-        name: id === socket.id ? `${username} (You)` : `Guest-${id.slice(0, 5)}`,
+        name: id === socket.id ? `${username} (You)` : `Guest-${shortId(id)}`,
       }));
       setParticipants(mapped);
       setRemoteIds(cleanIds.filter((id) => id !== socket.id));
@@ -398,7 +401,7 @@ const didConnectRef = useRef(false);
         const prevMap = new Map(prev.map((p) => [p.id, p.name]));
         return cleanIds.map((id) => ({
           id,
-          name: id === socket.id ? meName : prevMap.get(id) || `Guest-${id.slice(0, 5)}`,
+          name: id === socket.id ? meName : prevMap.get(id) || `Guest-${shortId(id)}`,
         }));
       });
 
@@ -425,7 +428,7 @@ const didConnectRef = useRef(false);
         const meName = `${username} (You)`;
         return ids.map((id) => ({
           id,
-          name: id === socket.id ? meName : prevMap.get(id) || `Guest-${id.slice(0, 5)}`,
+          name: id === socket.id ? meName : prevMap.get(id) || `Guest-${shortId(id)}`,
         }));
       });
 
