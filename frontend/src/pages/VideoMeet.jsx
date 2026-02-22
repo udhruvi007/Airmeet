@@ -3,6 +3,18 @@ import { useParams, useNavigate } from "react-router-dom";
 import io from "socket.io-client";
 const safeId = (x) => (typeof x === "string" ? x : String(x || ""));
 const shortId = (x) => safeId(x).slice(0, 5);
+const normalizeIds = (arr) =>
+  (Array.isArray(arr) ? arr : [])
+    .map((x) => (typeof x === "string" ? x : x?.id))
+    .filter(Boolean);
+
+const normalizePeople = (arr) =>
+  (Array.isArray(arr) ? arr : [])
+    .map((x) => {
+      if (typeof x === "string") return { id: x, name: null };
+      return { id: x?.id, name: x?.name || null };
+    })
+    .filter((p) => !!p.id);
 const SERVER_URL = process.env.REACT_APP_SERVER_URL || "http://localhost:8000";
 const iceServers = [{ urls: "stun:stun.l.google.com:19302" }];
 
@@ -209,57 +221,6 @@ const didConnectRef = useRef(false);
   // ---------------------------
   // WebRTC
   // ---------------------------
-  const createPeer = useCallback(
-    (remoteSocketId) => {
-      const pc = new RTCPeerConnection({ iceServers });
-
-      const stream = window.localStream;
-
-      if (stream) {
-        // audio from mic
-        stream.getAudioTracks().forEach((track) => pc.addTrack(track, stream));
-
-        // video: screen if sharing, else camera
-        const camVideo = stream.getVideoTracks()[0];
-        const screenVideo = screenStreamRef.current?.getVideoTracks?.()?.[0];
-
-        const videoToSend =
-          isScreenSharingRef.current && screenVideo ? screenVideo : camVideo;
-
-        if (videoToSend) {
-          pc.addTrack(
-            videoToSend,
-            isScreenSharingRef.current ? screenStreamRef.current : stream
-          );
-        }
-      }
-
-      pc.onicecandidate = (e) => {
-        if (e.candidate && socketRef.current) {
-          socketRef.current.emit("signal", remoteSocketId, {
-            candidate: e.candidate,
-          });
-        }
-      };
-
-      pc.ontrack = (e) => {
-        const [remoteStream] = e.streams;
-        if (!remoteStream) return;
-
-        const el = remoteVideoRefs.current[remoteSocketId];
-        if (el) attachStream(el, remoteStream, false);
-
-        setRemoteIds((prev) =>
-          prev.includes(remoteSocketId) ? prev : [...prev, remoteSocketId]
-        );
-      };
-
-      peersRef.current[remoteSocketId] = pc;
-      return pc;
-    },
-    [attachStream]
-  );
-
   const cleanupPeer = useCallback((id) => {
     try {
       peersRef.current[id]?.close();
@@ -276,6 +237,75 @@ const didConnectRef = useRef(false);
     });
   }, []);
 
+  // ✅ WebRTC: createPeer (FULL FIXED VERSION)
+const createPeer = useCallback(
+  (remoteSocketIdRaw) => {
+    // ✅ Safety: kabhi-kabhi object aa jata hai
+    const remoteSocketId =
+      typeof remoteSocketIdRaw === "string"
+        ? remoteSocketIdRaw
+        : remoteSocketIdRaw?.id;
+
+    if (!remoteSocketId) return null; // ✅ agar id hi nahi mili to stop
+
+    // ✅ already exists? return it (duplicate peer avoid)
+    if (peersRef.current[remoteSocketId]) return peersRef.current[remoteSocketId];
+
+    const pc = new RTCPeerConnection({ iceServers });
+
+    const stream = window.localStream;
+
+    if (stream) {
+      // audio from mic
+      stream.getAudioTracks().forEach((track) => pc.addTrack(track, stream));
+
+      // video: screen if sharing, else camera
+      const camVideo = stream.getVideoTracks()[0];
+      const screenVideo = screenStreamRef.current?.getVideoTracks?.()?.[0];
+
+      const videoToSend =
+        isScreenSharingRef.current && screenVideo ? screenVideo : camVideo;
+
+      if (videoToSend) {
+        pc.addTrack(
+          videoToSend,
+          isScreenSharingRef.current ? screenStreamRef.current : stream
+        );
+      }
+    }
+
+    pc.onicecandidate = (e) => {
+      if (e.candidate && socketRef.current) {
+        socketRef.current.emit("signal", remoteSocketId, {
+          candidate: e.candidate,
+        });
+      }
+    };
+
+    pc.ontrack = (e) => {
+      const [remoteStream] = e.streams;
+      if (!remoteStream) return;
+
+      const el = remoteVideoRefs.current[remoteSocketId];
+      if (el) attachStream(el, remoteStream, false);
+
+      setRemoteIds((prev) =>
+        prev.includes(remoteSocketId) ? prev : [...prev, remoteSocketId]
+      );
+    };
+
+    pc.onconnectionstatechange = () => {
+      const st = pc.connectionState;
+      if (st === "failed" || st === "disconnected" || st === "closed") {
+        cleanupPeer(remoteSocketId);
+      }
+    };
+
+    peersRef.current[remoteSocketId] = pc;
+    return pc;
+  },
+  [attachStream, cleanupPeer]
+);
   const closeAllPeers = useCallback(() => {
     Object.keys(peersRef.current).forEach((id) => {
       try {
@@ -368,13 +398,22 @@ const didConnectRef = useRef(false);
 
       setWaitingRoom(Array.isArray(waiting) ? waiting : []);
 
-      const cleanIds = Array.isArray(ids) ? ids : [];
-      const mapped = cleanIds.map((id) => ({
-        id,
-        name: id === socket.id ? `${username} (You)` : `Guest-${shortId(id)}`,
-      }));
-      setParticipants(mapped);
-      setRemoteIds(cleanIds.filter((id) => id !== socket.id));
+      const people = normalizePeople(ids);
+const cleanIds = people.map((p) => p.id);
+
+const mapped = cleanIds.map((id) => {
+  const fromPayload = people.find((p) => p.id === id)?.name;
+  return {
+    id,
+    name:
+      id === socket.id
+        ? `${username} (You)`
+        : fromPayload || `Guest-${shortId(id)}`,
+  };
+});
+
+setParticipants(mapped);
+setRemoteIds(cleanIds.filter((id) => id !== socket.id));
 
       // init raisedHands keys
       setRaisedHands((prev) => {
@@ -393,19 +432,26 @@ const didConnectRef = useRef(false);
     });
 
     socket.on("participants-update", (ids) => {
-      const cleanIds = Array.isArray(ids) ? ids : [];
+const people = normalizePeople(ids);
+const cleanIds = people.map((p) => p.id);
 
-      setParticipants((prev) => {
-        const meName = `${username} (You)`;
-        const prevMap = new Map(prev.map((p) => [p.id, p.name]));
-        return cleanIds.map((id) => ({
-          id,
-          name: id === socket.id ? meName : prevMap.get(id) || `Guest-${shortId(id)}`,
-        }));
-      });
+setParticipants((prev) => {
+  const meName = `${username} (You)`;
+  const prevMap = new Map(prev.map((p) => [p.id, p.name]));
 
-      setRemoteIds(cleanIds.filter((id) => id !== socket.id));
+  return cleanIds.map((id) => {
+    const fromPayload = people.find((p) => p.id === id)?.name;
+    return {
+      id,
+      name:
+        id === socket.id
+          ? meName
+          : prevMap.get(id) || fromPayload || `Guest-${shortId(id)}`,
+    };
+  });
+});
 
+setRemoteIds(cleanIds.filter((id) => id !== socket.id));
       setRaisedHands((prev) => {
         const next = { ...prev };
         cleanIds.forEach((id) => {
@@ -419,37 +465,49 @@ const didConnectRef = useRef(false);
       });
     });
 
-    socket.on("user-joined", async (newUserId, roomClients) => {
-      const ids = Array.isArray(roomClients) ? roomClients : [];
+socket.on("user-joined", async (newUserIdRaw, roomClients) => {
+  const people = normalizePeople(roomClients);
+  const ids = people.map((p) => p.id);
 
-      setParticipants((prev) => {
-        const prevMap = new Map(prev.map((p) => [p.id, p.name]));
-        const meName = `${username} (You)`;
-        return ids.map((id) => ({
-          id,
-          name: id === socket.id ? meName : prevMap.get(id) || `Guest-${shortId(id)}`,
-        }));
-      });
+  // ✅ newUserId ko safe string bana do (kabhi object aa jata hai)
+  const newUserId =
+    typeof newUserIdRaw === "string" ? newUserIdRaw : newUserIdRaw?.id;
 
-      setRemoteIds(ids.filter((id) => id !== socket.id));
+  setParticipants((prev) => {
+    const prevMap = new Map(prev.map((p) => [p.id, p.name]));
+    const meName = `${username} (You)`;
 
-      // create offer to new user
-      if (newUserId !== socket.id) {
-        const pc = peersRef.current[newUserId] || createPeer(newUserId);
-        try {
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          socket.emit("signal", newUserId, { sdp: pc.localDescription });
-        } catch (e) {
-          console.error("Offer error:", e);
-        }
-      }
+    return ids.map((id) => {
+      const fromPayload = people.find((p) => p.id === id)?.name;
+      return {
+        id,
+        name:
+          id === socket.id
+            ? meName
+            : prevMap.get(id) || fromPayload || `Guest-${shortId(id)}`,
+      };
     });
+  });
 
+  setRemoteIds(ids.filter((id) => id !== socket.id));
+
+  // ✅ create offer only if newUserId valid string
+  if (newUserId && newUserId !== socket.id) {
+    const pc = peersRef.current[newUserId] || createPeer(newUserId);
+    if (!pc) return;
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      socket.emit("signal", newUserId, { sdp: pc.localDescription });
+    } catch (e) {
+      console.error("Offer error:", e);
+    }
+  }
+});
     socket.on("signal", async (fromId, payload) => {
       let pc = peersRef.current[fromId];
       if (!pc) pc = createPeer(fromId);
-
+ if (!pc) return;
       try {
         if (payload?.sdp) {
           await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
@@ -471,7 +529,9 @@ const didConnectRef = useRef(false);
       if (!showChatRef.current) setNewMessages((p) => p + 1);
     });
 
-    socket.on("user-left", (id) => {
+    socket.on("user-left", (idRaw) => {
+       const id = typeof idRaw === "string" ? idRaw : idRaw?.id;
+  if (!id) return;
       cleanupPeer(id);
       setMessages((prev) => [
         ...prev,
@@ -516,6 +576,7 @@ const didConnectRef = useRef(false);
       } catch {}
       socketRef.current = null;
       closeAllPeers();
+      didConnectRef.current = false;
     };
   }, [
     askForUsername,
