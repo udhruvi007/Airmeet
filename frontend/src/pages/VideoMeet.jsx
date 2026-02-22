@@ -3,11 +3,6 @@ import { useParams, useNavigate } from "react-router-dom";
 import io from "socket.io-client";
 const safeId = (x) => (typeof x === "string" ? x : String(x || ""));
 const shortId = (x) => safeId(x).slice(0, 5);
-const normalizeIds = (arr) =>
-  (Array.isArray(arr) ? arr : [])
-    .map((x) => (typeof x === "string" ? x : x?.id))
-    .filter(Boolean);
-
 const normalizePeople = (arr) =>
   (Array.isArray(arr) ? arr : [])
     .map((x) => {
